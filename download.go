@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log"
 	"math/rand/v2"
@@ -61,31 +62,16 @@ func (dl *Downloader) Download() error {
 	pieceQueue := make(chan int)
 	defer close(pieceQueue)
 
-	results := make(chan pieceResult)
-
 	for _, peerAddr := range peerAddrs {
 		dl.wg.Add(1)
 		go func() {
 			defer dl.wg.Done()
 
-			if err := dl.spawnPeer(peerAddr, pieceQueue, results); err != nil {
+			if err := dl.spawnPeer(peerAddr, pieceQueue, out); err != nil {
 				log.Println("peer:", err)
 			}
 		}()
 	}
-
-	dl.wg.Add(1)
-	go func() {
-		dl.wg.Done()
-
-		for res := range results {
-			offset := int64(res.index) * dl.torrent.Info.PieceLength
-			if _, err := out.WriteAt(res.data, offset); err != nil {
-				log.Fatalln("write:", err)
-			}
-			dl.putBuffer(res.data)
-		}
-	}()
 
 	for pieceIndex := range randomPieces(dl.torrent.Info.NumPieces()) {
 		pieceQueue <- pieceIndex
@@ -100,7 +86,7 @@ type pieceResult struct {
 	data  []byte
 }
 
-func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, results chan<- pieceResult) error {
+func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, dst io.WriterAt) error {
 	conn, err := net.DialTimeout("tcp", peerAddr, peerDialTimeout)
 	if err != nil {
 		return err
@@ -123,21 +109,8 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, results 
 	}
 
 	for pieceIndex := range pieceQueue {
-		data, err := dl.downloadPiece(peer, pieceIndex)
-		if err != nil {
+		if err := dl.downloadPiece(peer, pieceIndex, dst); err != nil {
 			return err
-		}
-
-		sum := sha1.Sum(data)
-		hashOffset := pieceIndex * sha1.Size
-		if !bytes.Equal(sum[:], []byte(dl.torrent.Info.Pieces[hashOffset:hashOffset+sha1.Size])) {
-			dl.putBuffer(data)
-			return errors.New("sha1 hash didn't match")
-		}
-
-		results <- pieceResult{
-			index: pieceIndex,
-			data:  data,
 		}
 	}
 
@@ -161,15 +134,11 @@ func randomPieces(n int) iter.Seq[int] {
 	}
 }
 
-func (dl *Downloader) downloadPiece(p *Peer, index int) (buffer []byte, err error) {
-	buffer = dl.getBuffer()
-	piecelen := len(buffer)
+func (dl *Downloader) downloadPiece(p *Peer, index int, dst io.WriterAt) (err error) {
+	buffer := dl.getBuffer()
+	defer dl.putBuffer(buffer)
 
-	defer func() {
-		if err != nil {
-			dl.putBuffer(buffer)
-		}
-	}()
+	piecelen := len(buffer)
 
 	var state struct {
 		offset     uint32
@@ -189,7 +158,7 @@ func (dl *Downloader) downloadPiece(p *Peer, index int) (buffer []byte, err erro
 				}
 
 				if err := p.SendRequest(uint32(index), state.offset, blocksize); err != nil {
-					return nil, err
+					return err
 				}
 
 				state.offset += blocksize
@@ -230,10 +199,18 @@ func (dl *Downloader) downloadPiece(p *Peer, index int) (buffer []byte, err erro
 			}
 		}()
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return buffer, nil
+
+	sum := sha1.Sum(buffer)
+	hashOffset := index * sha1.Size
+	if !bytes.Equal(sum[:], []byte(dl.torrent.Info.Pieces[hashOffset:hashOffset+sha1.Size])) {
+		return errors.New("sha1 hash didn't match")
+	}
+
+	_, err = dst.WriteAt(buffer, int64(index*piecelen))
+	return err
 }
 
 func (dl *Downloader) getBuffer() []byte {
