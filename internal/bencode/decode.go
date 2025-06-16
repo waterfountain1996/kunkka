@@ -85,6 +85,9 @@ func decodeList(r *bufio.Reader) ([]any, error) {
 		}
 		items = append(items, value)
 	}
+	if _, err := r.Discard(1); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
@@ -121,6 +124,9 @@ func decodeDict(r *bufio.Reader) (map[string]any, error) {
 			return nil, err
 		}
 		items[key] = value
+	}
+	if _, err := r.Discard(1); err != nil {
+		return nil, err
 	}
 	return items, nil
 }
