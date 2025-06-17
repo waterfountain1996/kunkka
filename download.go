@@ -30,6 +30,7 @@ type Downloader struct {
 	wg         sync.WaitGroup
 	bufPool    sync.Pool
 	peerCount  atomic.Int32
+	downloaded atomic.Uint64
 	pieceQueue chan int
 	announceCh chan struct{}
 }
@@ -72,10 +73,11 @@ func (dl *Downloader) announce(out io.WriterAt) error {
 	for {
 		log.Println("announcing")
 		_, peerAddrs, err := announce(dl.torrent.AnnounceURL, announceParams{
-			InfoHash: dl.infohash,
-			PeerID:   peerID,
-			Port:     6881,
-			Event:    event,
+			InfoHash:   dl.infohash,
+			PeerID:     peerID,
+			Port:       6881,
+			Downloaded: dl.downloaded.Load(),
+			Event:      event,
 		})
 		if err != nil {
 			return err
@@ -237,7 +239,8 @@ func (dl *Downloader) downloadPiece(p *Peer, index int, dst io.WriterAt) (err er
 		return errors.New("sha1 hash didn't match")
 	}
 
-	log.Printf("Piece %d completed\n", index)
+	dl.downloaded.Add(uint64(len(buffer)))
+	log.Printf("Piece %d completed (%d/%d)\n", index, dl.downloaded.Load(), *dl.torrent.Info.Length)
 
 	_, err = dst.WriteAt(buffer, int64(index*piecelen))
 	return err

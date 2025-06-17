@@ -17,7 +17,7 @@ type announceParams struct {
 	PeerID     string
 	Port       uint16
 	Uploaded   int64
-	Downloaded int64
+	Downloaded uint64
 	Left       int64
 	Event      string // started, completed, or stopped
 }
@@ -29,6 +29,8 @@ func announce(trackerURL string, params announceParams) (int64, []string, error)
 	if ev := params.Event; ev != "" {
 		q.Set("event", ev)
 	}
+	q.Set("port", strconv.FormatUint(uint64(params.Port), 10))
+	q.Set("downloaded", strconv.FormatUint(params.Downloaded, 10))
 	u := trackerURL + "?" + q.Encode()
 	res, err := http.Get(u)
 	if err != nil {
