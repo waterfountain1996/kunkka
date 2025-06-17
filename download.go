@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/waterfountain1996/kunkka/internal/message"
@@ -24,10 +25,13 @@ const peerDialTimeout = 3 * time.Second
 const pieceBlockSize uint32 = 16384 // 16 KB
 
 type Downloader struct {
-	torrent  *torrent.Torrent
-	infohash string
-	wg       sync.WaitGroup
-	bufPool  sync.Pool
+	torrent    *torrent.Torrent
+	infohash   string
+	wg         sync.WaitGroup
+	bufPool    sync.Pool
+	peerCount  atomic.Int32
+	pieceQueue chan int
+	announceCh chan struct{}
 }
 
 func NewDownloader(t *torrent.Torrent) *Downloader {
@@ -39,19 +43,13 @@ func NewDownloader(t *torrent.Torrent) *Downloader {
 				return make([]byte, t.Info.PieceLength)
 			},
 		},
+		pieceQueue: make(chan int),
+		announceCh: make(chan struct{}),
 	}
 }
 
 func (dl *Downloader) Download() error {
-	_, peerAddrs, err := announce(dl.torrent.AnnounceURL, announceParams{
-		InfoHash: dl.infohash,
-		PeerID:   peerID,
-		Port:     6881,
-		Event:    "started",
-	})
-	if err != nil {
-		return err
-	}
+	defer close(dl.pieceQueue)
 
 	out, err := os.Create(dl.torrent.Info.Name)
 	if err != nil {
@@ -59,26 +57,48 @@ func (dl *Downloader) Download() error {
 	}
 	defer out.Close()
 
-	pieceQueue := make(chan int)
-	defer close(pieceQueue)
-
-	for _, peerAddr := range peerAddrs {
-		dl.wg.Add(1)
-		go func() {
-			defer dl.wg.Done()
-
-			if err := dl.spawnPeer(peerAddr, pieceQueue, out); err != nil {
-				log.Println("peer:", err)
-			}
-		}()
-	}
+	go dl.announce(out)
 
 	for pieceIndex := range randomPieces(dl.torrent.Info.NumPieces()) {
-		pieceQueue <- pieceIndex
+		dl.pieceQueue <- pieceIndex
 	}
 
 	dl.wg.Wait()
 	return out.Sync()
+}
+
+func (dl *Downloader) announce(out io.WriterAt) error {
+	event := "started"
+	for {
+		log.Println("announcing")
+		_, peerAddrs, err := announce(dl.torrent.AnnounceURL, announceParams{
+			InfoHash: dl.infohash,
+			PeerID:   peerID,
+			Port:     6881,
+			Event:    event,
+		})
+		if err != nil {
+			return err
+		}
+
+		for _, peerAddr := range peerAddrs {
+			dl.wg.Add(1)
+			go func() {
+				defer dl.wg.Done()
+
+				if err := dl.spawnPeer(peerAddr, dl.pieceQueue, out); err != nil {
+					log.Println("peer:", err)
+				}
+			}()
+		}
+
+		select {
+		case <-time.After(60 * time.Second):
+		case <-dl.announceCh:
+		}
+
+		event = "empty"
+	}
 }
 
 type pieceResult struct {
@@ -94,6 +114,14 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, dst io.W
 	defer conn.Close()
 
 	log.Printf("connected to peer %s\n", conn.RemoteAddr())
+	defer log.Println("peer dropped:", conn.RemoteAddr())
+
+	dl.peerCount.Add(1)
+	defer func() {
+		if n := dl.peerCount.Add(-1); n == 0 {
+			dl.announceCh <- struct{}{}
+		}
+	}()
 
 	peer := NewPeer(conn)
 	if err := writeHandshake(conn, dl.infohash, peerID); err != nil {
@@ -208,6 +236,8 @@ func (dl *Downloader) downloadPiece(p *Peer, index int, dst io.WriterAt) (err er
 	if !bytes.Equal(sum[:], []byte(dl.torrent.Info.Pieces[hashOffset:hashOffset+sha1.Size])) {
 		return errors.New("sha1 hash didn't match")
 	}
+
+	log.Printf("Piece %d completed\n", index)
 
 	_, err = dst.WriteAt(buffer, int64(index*piecelen))
 	return err
