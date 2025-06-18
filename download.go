@@ -22,13 +22,12 @@ import (
 
 const peerDialTimeout = 3 * time.Second
 
-const pieceBlockSize uint32 = 16384 // 16 KB
+const pieceBlockSize = 16384 // 16 KB
 
 type Downloader struct {
 	torrent    *torrent.Torrent
 	infohash   string
 	wg         sync.WaitGroup
-	bufPool    sync.Pool
 	peerCount  atomic.Int32
 	downloaded atomic.Uint64
 	pieceQueue chan int
@@ -37,13 +36,8 @@ type Downloader struct {
 
 func NewDownloader(t *torrent.Torrent) *Downloader {
 	return &Downloader{
-		torrent:  t,
-		infohash: t.Info.Hash(),
-		bufPool: sync.Pool{
-			New: func() any {
-				return make([]byte, t.Info.PieceLength)
-			},
-		},
+		torrent:    t,
+		infohash:   t.Info.Hash(),
 		pieceQueue: make(chan int),
 		announceCh: make(chan struct{}),
 	}
@@ -133,10 +127,24 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.Wri
 	}
 
 	for pieceIndex := range pieceQueue {
-		if err := dl.downloadPiece(peer, pieceIndex, dst); err != nil {
+		dw := downloadWork{
+			index:  pieceIndex,
+			length: int(dl.torrent.Info.PieceLength),
+		}
+		copy(dw.checksum[:], []byte(dl.torrent.Info.Pieces[pieceIndex*sha1.Size:]))
+
+		data, err := downloadPiece(peer, dw)
+		if err != nil {
 			pieceQueue <- pieceIndex
 			return err
 		}
+
+		if _, err := dst.WriteAt(data, int64(pieceIndex)*dl.torrent.Info.PieceLength); err != nil {
+			return err
+		}
+
+		dl.downloaded.Add(uint64(len(data)))
+		log.Printf("Piece %d completed (%d/%d)\n", dw.index, dl.downloaded.Load(), *dl.torrent.Info.Length)
 	}
 
 	return nil
@@ -184,31 +192,35 @@ func randomPieces(n int) iter.Seq[int] {
 	}
 }
 
-func (dl *Downloader) downloadPiece(p *Peer, index int, dst io.WriterAt) (err error) {
-	buffer := dl.getBuffer()
-	defer dl.putBuffer(buffer)
+type downloadWork struct {
+	index    int
+	length   int
+	checksum [sha1.Size]byte
+}
 
-	piecelen := len(buffer)
+func downloadPiece(p *Peer, dw downloadWork) ([]byte, error) {
+	buffer := make([]byte, dw.length)
 
 	var state struct {
-		offset     uint32
-		downloaded uint32
-		backlog    uint
+		offset     int
+		downloaded int
+		backlog    int
 	}
 
 	p.nc.SetDeadline(time.Now().Add(30 * time.Second))
 	defer p.nc.SetDeadline(time.Time{})
 
-	for state.downloaded < uint32(piecelen) {
-		if !p.IsChoked() {
-			for state.backlog < 5 && state.offset < uint32(piecelen) {
+	const maxbacklog = 5
+	for state.downloaded < dw.length {
+		if !p.IsChoking() {
+			for state.backlog < maxbacklog && state.offset < dw.length {
 				blocksize := pieceBlockSize
-				if sz := uint32(piecelen) - state.offset; sz < blocksize {
+				if sz := dw.length - state.offset; sz < blocksize {
 					blocksize = sz
 				}
 
-				if err := p.SendRequest(uint32(index), state.offset, blocksize); err != nil {
-					return err
+				if err := p.SendRequest(uint32(dw.index), uint32(state.offset), uint32(blocksize)); err != nil {
+					return nil, err
 				}
 
 				state.offset += blocksize
@@ -216,6 +228,7 @@ func (dl *Downloader) downloadPiece(p *Peer, index int, dst io.WriterAt) (err er
 			}
 		}
 
+		// TODO: Make this a method on a Peer
 		err := func() error {
 			for {
 				msg, err := message.Read(p.r)
@@ -223,55 +236,40 @@ func (dl *Downloader) downloadPiece(p *Peer, index int, dst io.WriterAt) (err er
 					return err
 				}
 
-				// Ignore keepalive messages
 				if msg == nil {
 					continue
 				}
 
+				// TODO: Do we really need atomics here?
 				switch msg.ID {
 				case message.MsgChoke:
-					p.choked.Store(true)
+					p.choking.Store(true)
 				case message.MsgUnchoke:
-					p.choked.Store(false)
+					p.choking.Store(false)
 				case message.MsgInterested:
 					p.interested.Store(true)
 				case message.MsgNotInterested:
 					p.interested.Store(false)
 				case message.MsgPiece:
-					n, err := message.DecodePiece(buffer, index, msg)
+					n, err := message.DecodePiece(buffer, dw.index, msg)
 					if err != nil {
 						return err
 					}
 					state.backlog--
-					state.downloaded += uint32(n)
+					state.downloaded += n
 				}
 				return nil
 			}
 		}()
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	sum := sha1.Sum(buffer)
-	hashOffset := index * sha1.Size
-	if !bytes.Equal(sum[:], []byte(dl.torrent.Info.Pieces[hashOffset:hashOffset+sha1.Size])) {
-		return errors.New("sha1 hash didn't match")
+	if !bytes.Equal(sum[:], dw.checksum[:]) {
+		return nil, errors.New("sha1 checksum mismatch")
 	}
 
-	dl.downloaded.Add(uint64(len(buffer)))
-	log.Printf("Piece %d completed (%d/%d)\n", index, dl.downloaded.Load(), *dl.torrent.Info.Length)
-
-	_, err = dst.WriteAt(buffer, int64(index*piecelen))
-	return err
-}
-
-func (dl *Downloader) getBuffer() []byte {
-	buffer := dl.bufPool.Get().([]byte)
-	clear(buffer)
-	return buffer
-}
-
-func (dl *Downloader) putBuffer(buffer []byte) {
-	dl.bufPool.Put(buffer)
+	return buffer, nil
 }

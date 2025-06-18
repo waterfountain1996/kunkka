@@ -44,7 +44,7 @@ type Piece struct {
 type Peer struct {
 	r          *bufio.Reader
 	nc         net.Conn
-	choked     atomic.Bool
+	choking    atomic.Bool
 	interested atomic.Bool
 }
 
@@ -53,13 +53,13 @@ func NewPeer(nc net.Conn) *Peer {
 		r:  bufio.NewReader(nc),
 		nc: nc,
 	}
-	peer.choked.Store(true)
+	peer.choking.Store(true)
 	peer.interested.Store(false)
 	return peer
 }
 
-func (p *Peer) IsChoked() bool {
-	return p.choked.Load()
+func (p *Peer) IsChoking() bool {
+	return p.choking.Load()
 }
 
 func (p *Peer) SendInterested() error {
