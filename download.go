@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,8 +51,6 @@ func NewDownloader(t *torrent.Torrent) *Downloader {
 }
 
 func (dl *Downloader) Download() error {
-	defer close(dl.pieceQueue)
-
 	out, err := os.Create(dl.torrent.Info.Name)
 	if err != nil {
 		return err
@@ -64,13 +63,18 @@ func (dl *Downloader) Download() error {
 		dl.pieceQueue <- pieceIndex
 	}
 
+	for dl.downloaded.Load() < uint64(*dl.torrent.Info.Length) {
+		runtime.Gosched()
+	}
+	close(dl.pieceQueue)
+
 	dl.wg.Wait()
 	return out.Sync()
 }
 
 func (dl *Downloader) announce(out io.WriterAt) error {
 	event := "started"
-	for {
+	for dl.downloaded.Load() < uint64(*dl.torrent.Info.Length) {
 		log.Println("announcing")
 		_, peerAddrs, err := announce(dl.torrent.AnnounceURL, announceParams{
 			InfoHash:   dl.infohash,
@@ -101,6 +105,7 @@ func (dl *Downloader) announce(out io.WriterAt) error {
 
 		event = "empty"
 	}
+	return nil
 }
 
 type pieceResult struct {
