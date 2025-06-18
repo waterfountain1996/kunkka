@@ -109,14 +109,11 @@ type pieceResult struct {
 }
 
 func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, dst io.WriterAt) error {
-	conn, err := net.DialTimeout("tcp", peerAddr, peerDialTimeout)
+	conn, err := dialPeer(peerAddr, dl.infohash, peerID)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-
-	log.Printf("connected to peer %s\n", conn.RemoteAddr())
-	defer log.Println("peer dropped:", conn.RemoteAddr())
 
 	dl.peerCount.Add(1)
 	defer func() {
@@ -126,13 +123,6 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, dst io.W
 	}()
 
 	peer := NewPeer(conn)
-	if err := writeHandshake(conn, dl.infohash, peerID); err != nil {
-		return fmt.Errorf("handshake: %w", err)
-	}
-
-	if recvInfohash, _, err := readHandshake(peer.r); err != nil || dl.infohash != recvInfohash {
-		return err
-	}
 
 	if err := peer.SendInterested(); err != nil {
 		return fmt.Errorf("interested: %w", err)
@@ -145,6 +135,31 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, dst io.W
 	}
 
 	return nil
+}
+
+func dialPeer(addr string, infohash string, peerID string) (conn net.Conn, err error) {
+	conn, err = net.DialTimeout("tcp", addr, peerDialTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer func(conn net.Conn) {
+		if err != nil {
+			conn.Close()
+		}
+	}(conn)
+
+	if err := writeHandshake(conn, infohash, peerID); err != nil {
+		return nil, err
+	}
+
+	recvInfohash, _, err := readHandshake(conn)
+	if err != nil {
+		return nil, err
+	} else if recvInfohash != infohash {
+		return nil, errors.New("infohash mismatch")
+	}
+
+	return conn, nil
 }
 
 func randomPieces(n int) iter.Seq[int] {
