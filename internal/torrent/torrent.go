@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"unicode/utf8"
 
 	"github.com/waterfountain1996/kunkka/internal/bencode"
@@ -40,6 +41,16 @@ func (i *Info) Hash() string {
 type File struct {
 	Length int64
 	Path   string
+}
+
+func FromFile(filename string) (*Torrent, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return Parse(f)
 }
 
 func Parse(r io.Reader) (*Torrent, error) {

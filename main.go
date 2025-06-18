@@ -17,13 +17,7 @@ func main() {
 	}
 	filename := os.Args[1]
 
-	f, err := os.Open(filename)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
-
-	t, err := torrent.Parse(f)
+	t, err := torrent.FromFile(filename)
 	if err != nil {
 		log.Fatal(err)
 	}
