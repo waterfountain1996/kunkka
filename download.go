@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -239,12 +238,12 @@ func (dl *Downloader) downloadPiece(p *Peer, index int, dst io.WriterAt) (err er
 				case message.MsgNotInterested:
 					p.interested.Store(false)
 				case message.MsgPiece:
-					var idx, offset uint32
-					_, _ = binary.Decode(msg.Payload[0:4], binary.BigEndian, &idx)
-					_, _ = binary.Decode(msg.Payload[4:8], binary.BigEndian, &offset)
-					copy(buffer[offset:], msg.Payload[8:])
+					n, err := message.DecodePiece(buffer, index, msg)
+					if err != nil {
+						return err
+					}
 					state.backlog--
-					state.downloaded += uint32(len(msg.Payload[8:]))
+					state.downloaded += uint32(n)
 				}
 				return nil
 			}
