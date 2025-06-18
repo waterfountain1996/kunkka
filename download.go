@@ -108,7 +108,7 @@ type pieceResult struct {
 	data  []byte
 }
 
-func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, dst io.WriterAt) error {
+func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.WriterAt) error {
 	conn, err := dialPeer(peerAddr, dl.infohash, peerID)
 	if err != nil {
 		return err
@@ -130,6 +130,7 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue <-chan int, dst io.W
 
 	for pieceIndex := range pieceQueue {
 		if err := dl.downloadPiece(peer, pieceIndex, dst); err != nil {
+			pieceQueue <- pieceIndex
 			return err
 		}
 	}
