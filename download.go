@@ -9,7 +9,6 @@ import (
 	"iter"
 	"log"
 	"math/rand/v2"
-	"net"
 	"os"
 	"runtime"
 	"sync"
@@ -20,9 +19,11 @@ import (
 	"github.com/waterfountain1996/kunkka/internal/torrent"
 )
 
-const peerDialTimeout = 3 * time.Second
-
-const pieceBlockSize = 16384 // 16 KB
+const (
+	pieceBlockSize       = 16384 // 16 KB
+	maxBacklog           = 5     // Maximum requests sent to client awaiting a response
+	pieceDownloadTimeout = 30 * time.Second
+)
 
 type Downloader struct {
 	torrent    *torrent.Torrent
@@ -107,12 +108,6 @@ type pieceResult struct {
 }
 
 func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.WriterAt) error {
-	conn, err := dialPeer(peerAddr, dl.infohash, peerID)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
 	dl.peerCount.Add(1)
 	defer func() {
 		if n := dl.peerCount.Add(-1); n == 0 {
@@ -120,9 +115,14 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.Wri
 		}
 	}()
 
-	peer := NewPeer(conn)
+	conn, err := dialPeer(peerAddr, dl.infohash, peerID)
+	if err != nil {
+		return err
+	}
+	peer := newPeer(conn)
+	defer peer.close()
 
-	if err := peer.SendInterested(); err != nil {
+	if err := peer.sendInterested(); err != nil {
 		return fmt.Errorf("interested: %w", err)
 	}
 
@@ -150,31 +150,6 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.Wri
 	return nil
 }
 
-func dialPeer(addr string, infohash string, peerID string) (conn net.Conn, err error) {
-	conn, err = net.DialTimeout("tcp", addr, peerDialTimeout)
-	if err != nil {
-		return nil, err
-	}
-	defer func(conn net.Conn) {
-		if err != nil {
-			conn.Close()
-		}
-	}(conn)
-
-	if err := writeHandshake(conn, infohash, peerID); err != nil {
-		return nil, err
-	}
-
-	recvInfohash, _, err := readHandshake(conn)
-	if err != nil {
-		return nil, err
-	} else if recvInfohash != infohash {
-		return nil, errors.New("infohash mismatch")
-	}
-
-	return conn, nil
-}
-
 func randomPieces(n int) iter.Seq[int] {
 	return func(yield func(int) bool) {
 		pieces := make([]int, n)
@@ -198,71 +173,58 @@ type downloadWork struct {
 	checksum [sha1.Size]byte
 }
 
-func downloadPiece(p *Peer, dw downloadWork) ([]byte, error) {
+// Download a piece from a peer and verify its SHA1 checksum. Returned value holds the full piece.
+func downloadPiece(p *peer, dw downloadWork) ([]byte, error) {
 	buffer := make([]byte, dw.length)
 
 	var state struct {
 		offset     int
 		downloaded int
-		backlog    int
 	}
 
-	p.nc.SetDeadline(time.Now().Add(30 * time.Second))
-	defer p.nc.SetDeadline(time.Time{})
+	p.conn.SetDeadline(time.Now().Add(pieceDownloadTimeout))
+	defer p.conn.SetDeadline(time.Time{})
 
-	const maxbacklog = 5
 	for state.downloaded < dw.length {
-		if !p.IsChoking() {
-			for state.backlog < maxbacklog && state.offset < dw.length {
+		if p.state&flagChoking == 0 {
+			for p.backlog < maxBacklog && state.offset < dw.length {
 				blocksize := pieceBlockSize
 				if sz := dw.length - state.offset; sz < blocksize {
 					blocksize = sz
 				}
 
-				if err := p.SendRequest(uint32(dw.index), uint32(state.offset), uint32(blocksize)); err != nil {
+				if err := p.sendRequest(dw.index, state.offset, blocksize); err != nil {
 					return nil, err
 				}
 
 				state.offset += blocksize
-				state.backlog++
 			}
 		}
 
-		// TODO: Make this a method on a Peer
-		err := func() error {
-			for {
-				msg, err := message.Read(p.r)
-				if err != nil {
-					return err
-				}
-
-				if msg == nil {
-					continue
-				}
-
-				// TODO: Do we really need atomics here?
-				switch msg.ID {
-				case message.MsgChoke:
-					p.choking.Store(true)
-				case message.MsgUnchoke:
-					p.choking.Store(false)
-				case message.MsgInterested:
-					p.interested.Store(true)
-				case message.MsgNotInterested:
-					p.interested.Store(false)
-				case message.MsgPiece:
-					n, err := message.DecodePiece(buffer, dw.index, msg)
-					if err != nil {
-						return err
-					}
-					state.backlog--
-					state.downloaded += n
-				}
-				return nil
-			}
-		}()
+		msg, err := message.Read(p.r)
 		if err != nil {
 			return nil, err
+		}
+		// Ignore keepalive messages
+		if msg == nil {
+			continue
+		}
+		switch msg.ID {
+		case message.MsgChoke:
+			p.state |= flagChoking
+		case message.MsgUnchoke:
+			p.state &= ^flagChoking
+		case message.MsgInterested:
+			p.state |= flagInterested
+		case message.MsgNotInterested:
+			p.state &= ^flagInterested
+		case message.MsgPiece:
+			n, err := message.DecodePiece(buffer, dw.index, msg)
+			if err != nil {
+				return nil, err
+			}
+			p.backlog--
+			state.downloaded += n
 		}
 	}
 

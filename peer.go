@@ -2,14 +2,15 @@ package main
 
 import (
 	"bufio"
-	"encoding/binary"
 	"errors"
 	"io"
 	"net"
-	"sync/atomic"
+	"time"
 
 	"github.com/waterfountain1996/kunkka/internal/message"
 )
+
+const peerDialTimeout = 3 * time.Second
 
 const handshakeHeader = "\x13BitTorrent protocol"
 
@@ -22,61 +23,82 @@ func writeHandshake(w io.Writer, infohash string, peerID string) error {
 	return err
 }
 
-func readHandshake(r io.Reader) (string, string, error) {
+func readHandshake(r io.Reader, expectInfohash string) error {
 	var buf [68]byte
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
-		return "", "", err
+		return err
 	}
 	if string(buf[:20]) != handshakeHeader {
-		return "", "", errors.New("invalid handshake header")
+		return errors.New("invalid handshake header")
 	}
-	infohash := string(buf[28:48])
-	peerID := string(buf[48:])
-	return infohash, peerID, nil
-}
-
-type Piece struct {
-	Index  int
-	Offset int
-	Data   []byte
-}
-
-type Peer struct {
-	r          *bufio.Reader
-	nc         net.Conn
-	choking    atomic.Bool
-	interested atomic.Bool
-}
-
-func NewPeer(nc net.Conn) *Peer {
-	peer := &Peer{
-		r:  bufio.NewReader(nc),
-		nc: nc,
+	if infohash := string(buf[28:48]); infohash != expectInfohash {
+		return errors.New("infohash mismatch")
 	}
-	peer.choking.Store(true)
-	peer.interested.Store(false)
-	return peer
+	return nil
 }
 
-func (p *Peer) IsChoking() bool {
-	return p.choking.Load()
+type peerState int
+
+const (
+	flagChoking      peerState = 0b0001 // Peer is choking our client
+	flagInterested   peerState = 0b0010 // Peer is interested in our client
+	flagAmChoking    peerState = 0b0100 // Our client is choking the peer
+	flagAmInterested peerState = 0b1000 // Our client is interested in the peer
+)
+
+type peer struct {
+	r     *bufio.Reader
+	conn  net.Conn
+	state peerState
+	// Number of requests sent awaiting a reply.
+	// Incremented automatically by sendRequest and recvPiece.
+	backlog int
 }
 
-func (p *Peer) SendInterested() error {
-	var msg [5]byte
-	binary.BigEndian.PutUint32(msg[:], 1)
-	msg[4] = byte(message.MsgInterested)
-	_, err := p.nc.Write(msg[:])
+func newPeer(conn net.Conn) *peer {
+	return &peer{
+		r:     bufio.NewReader(conn),
+		conn:  conn,
+		state: flagChoking | flagAmChoking,
+	}
+}
+
+func dialPeer(addr string, infohash string, peerID string) (conn net.Conn, err error) {
+	conn, err = net.DialTimeout("tcp", addr, peerDialTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer func(conn net.Conn) {
+		if err != nil {
+			conn.Close()
+		}
+	}(conn)
+
+	if err := writeHandshake(conn, infohash, peerID); err != nil {
+		return nil, err
+	}
+
+	if err := readHandshake(conn, infohash); err != nil {
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+func (p *peer) sendInterested() error {
+	p.state |= flagAmInterested
+	msg := message.Message{ID: message.MsgInterested}
+	_, err := p.conn.Write(msg.Pack())
 	return err
 }
 
-func (p *Peer) SendRequest(index, offset, blocksize uint32) error {
-	var msg [17]byte
-	binary.BigEndian.PutUint32(msg[0:4], 13)
-	msg[4] = byte(message.MsgRequest)
-	binary.BigEndian.PutUint32(msg[5:9], index)
-	binary.BigEndian.PutUint32(msg[9:13], offset)
-	binary.BigEndian.PutUint32(msg[13:17], blocksize)
-	_, err := p.nc.Write(msg[:])
+func (p *peer) sendRequest(index, offset, blocksize int) error {
+	p.backlog++
+	msg := message.FormatRequest(index, offset, blocksize)
+	_, err := p.conn.Write(msg.Pack())
 	return err
+}
+
+func (p *peer) close() error {
+	return p.conn.Close()
 }

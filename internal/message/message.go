@@ -52,6 +52,15 @@ type Message struct {
 	Payload []byte
 }
 
+func (m *Message) Pack() []byte {
+	length := 4 + 1 + len(m.Payload)
+	buf := make([]byte, length)
+	binary.BigEndian.PutUint32(buf, uint32(length))
+	buf[4] = byte(m.ID)
+	copy(buf[5:], m.Payload)
+	return buf
+}
+
 func Read(r io.Reader) (*Message, error) {
 	var msglen uint32
 	if err := binary.Read(r, binary.BigEndian, &msglen); err != nil {
@@ -117,4 +126,15 @@ func DecodePiece(dst []byte, idx int, m *Message) (int, error) {
 
 	n := copy(dst[offset:], src)
 	return n, nil
+}
+
+func FormatRequest(index, offset, blocksize int) *Message {
+	buf := make([]byte, 12)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(index))
+	binary.BigEndian.PutUint32(buf[4:8], uint32(offset))
+	binary.BigEndian.PutUint32(buf[8:12], uint32(blocksize))
+	return &Message{
+		ID:      MsgRequest,
+		Payload: buf,
+	}
 }
