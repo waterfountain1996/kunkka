@@ -131,6 +131,9 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.Wri
 			index:  pieceIndex,
 			length: int(dl.torrent.Info.PieceLength),
 		}
+		if length := int(*dl.torrent.Info.Length) - pieceIndex*dw.length; length < dw.length {
+			dw.length = length
+		}
 		copy(dw.checksum[:], []byte(dl.torrent.Info.Pieces[pieceIndex*sha1.Size:]))
 
 		data, err := downloadPiece(peer, dw)
