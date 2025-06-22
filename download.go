@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/waterfountain1996/kunkka/internal/bitfield"
 	"github.com/waterfountain1996/kunkka/internal/message"
 	"github.com/waterfountain1996/kunkka/internal/torrent"
 )
@@ -119,14 +121,46 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.Wri
 	if err != nil {
 		return err
 	}
-	peer := newPeer(conn)
-	defer peer.close()
+	p := newPeer(conn)
+	defer p.close()
 
-	if err := peer.sendInterested(); err != nil {
+	msg, err := message.Read(p.r)
+	if err != nil {
+		return err
+	}
+	if msg != nil {
+		if msg.ID == message.MsgBitfield {
+			// TODO: Check that it is of the right size
+			p.bf = msg.Payload
+		} else {
+			p.bf = bitfield.NewBitfield(dl.torrent.Info.NumPieces())
+		}
+
+		switch msg.ID {
+		case message.MsgChoke:
+			p.state |= flagChoking
+		case message.MsgUnchoke:
+			p.state &= ^flagChoking
+		case message.MsgInterested:
+			p.state |= flagInterested
+		case message.MsgNotInterested:
+			p.state &= ^flagInterested
+		case message.MsgHave:
+			index := int(binary.BigEndian.Uint32(msg.Payload))
+			p.setPiece(index)
+		}
+	}
+
+	if err := p.sendInterested(); err != nil {
 		return fmt.Errorf("interested: %w", err)
 	}
 
 	for pieceIndex := range pieceQueue {
+		if !p.hasPiece(pieceIndex) {
+			pieceQueue <- pieceIndex
+			continue
+		}
+
 		dw := downloadWork{
 			index:  pieceIndex,
 			length: int(dl.torrent.Info.PieceLength),
@@ -136,7 +170,7 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.Wri
 		}
 		copy(dw.checksum[:], []byte(dl.torrent.Info.Pieces[pieceIndex*sha1.Size:]))
 
-		data, err := downloadPiece(peer, dw)
+		data, err := downloadPiece(p, dw)
 		if err != nil {
 			pieceQueue <- pieceIndex
 			return err
@@ -221,6 +255,9 @@ func downloadPiece(p *peer, dw downloadWork) ([]byte, error) {
 			p.state |= flagInterested
 		case message.MsgNotInterested:
 			p.state &= ^flagInterested
+		case message.MsgHave:
+			index := int(binary.BigEndian.Uint32(msg.Payload))
+			p.setPiece(index)
 		case message.MsgPiece:
 			n, err := message.DecodePiece(buffer, dw.index, msg)
 			if err != nil {

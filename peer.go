@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"time"
 
+	"github.com/waterfountain1996/kunkka/internal/bitfield"
 	"github.com/waterfountain1996/kunkka/internal/message"
 )
 
@@ -49,6 +51,8 @@ const (
 type peer struct {
 	r     *bufio.Reader
 	conn  net.Conn
+	bf    bitfield.Bitfield
+	bfMu  sync.RWMutex // Protects bf
 	state peerState
 	// Number of requests sent awaiting a reply.
 	// Incremented automatically by sendRequest and recvPiece.
@@ -101,4 +105,16 @@ func (p *peer) sendRequest(index, offset, blocksize int) error {
 
 func (p *peer) close() error {
 	return p.conn.Close()
+}
+
+func (p *peer) setPiece(index int) {
+	p.bfMu.Lock()
+	defer p.bfMu.Unlock()
+	p.bf.Set(index)
+}
+
+func (p *peer) hasPiece(index int) bool {
+	p.bfMu.RLock()
+	defer p.bfMu.RUnlock()
+	return p.bf.IsSet(index)
 }
