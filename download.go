@@ -76,7 +76,9 @@ func (dl *Downloader) announce(out io.WriterAt) error {
 			InfoHash:   dl.infohash,
 			PeerID:     peerID,
 			Port:       6881,
+			Uploaded:   0,
 			Downloaded: dl.downloaded.Load(),
+			Left:       *dl.torrent.Info.Length - int64(dl.downloaded.Load()),
 			Event:      event,
 		})
 		if err != nil {

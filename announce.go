@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 
@@ -19,18 +21,22 @@ type announceParams struct {
 	Uploaded   int64
 	Downloaded uint64
 	Left       int64
-	Event      string // started, completed, or stopped
+	Event      string // started, completed, stopped or empty
 }
 
 func announce(trackerURL string, params announceParams) (int64, []string, error) {
 	q := &url.Values{}
 	q.Set("info_hash", params.InfoHash)
 	q.Set("peer_id", params.PeerID)
+	q.Set("port", strconv.FormatUint(uint64(params.Port), 10))
+	q.Set("uploaded", strconv.FormatInt(params.Uploaded, 10))
+	q.Set("downloaded", strconv.FormatUint(params.Downloaded, 10))
+	q.Set("left", strconv.FormatInt(params.Left, 10))
 	if ev := params.Event; ev != "" {
 		q.Set("event", ev)
 	}
-	q.Set("port", strconv.FormatUint(uint64(params.Port), 10))
-	q.Set("downloaded", strconv.FormatUint(params.Downloaded, 10))
+	q.Set("compact", "1")
+
 	u := trackerURL + "?" + q.Encode()
 	res, err := http.Get(u)
 	if err != nil {
@@ -64,16 +70,29 @@ func decodeAnnounceResponse(r io.Reader) (int64, []string, error) {
 				return 0, nil, errors.New("malformed tracker response")
 			}
 		case "peers":
-			raw, ok := value.([]any)
-			if !ok {
+			switch tt := value.(type) {
+			case []any:
+				peers = make([]string, len(tt))
+				for i, rawItem := range tt {
+					peerDict := rawItem.(map[string]any)
+					peerIP := peerDict["ip"].(string)
+					peerPort := peerDict["port"].(int64)
+					peers[i] = net.JoinHostPort(peerIP, strconv.FormatInt(peerPort, 10))
+				}
+			case string:
+				if tt == "" || len(tt)%6 != 0 {
+					return 0, nil, errors.New("malformed tracker response")
+				}
+				peers = make([]string, 0, len(tt)/6)
+				for i := 0; i < len(tt); i += 6 {
+					s := tt[i : i+6]
+					addr, _ := netip.AddrFromSlice([]byte(s[0:4]))
+					port := binary.BigEndian.Uint16([]byte(s[4:6]))
+					ap := netip.AddrPortFrom(addr, port)
+					peers = append(peers, ap.String())
+				}
+			default:
 				return 0, nil, errors.New("malformed tracker response")
-			}
-			peers = make([]string, len(raw))
-			for i, rawItem := range raw {
-				peerDict := rawItem.(map[string]any)
-				peerIP := peerDict["ip"].(string)
-				peerPort := peerDict["port"].(int64)
-				peers[i] = net.JoinHostPort(peerIP, strconv.FormatInt(peerPort, 10))
 			}
 		case "failure reason":
 			if errmsg, ok := value.(string); ok && errmsg != "" {
