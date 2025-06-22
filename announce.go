@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/waterfountain1996/kunkka/internal/bencode"
 )
@@ -24,7 +25,7 @@ type announceParams struct {
 	Event      string // started, completed, stopped or empty
 }
 
-func announce(trackerURL string, params announceParams) (int64, []string, error) {
+func announce(trackerURL string, params announceParams) (time.Duration, []string, error) {
 	q := &url.Values{}
 	q.Set("info_hash", params.InfoHash)
 	q.Set("peer_id", params.PeerID)
@@ -47,7 +48,7 @@ func announce(trackerURL string, params announceParams) (int64, []string, error)
 	return decodeAnnounceResponse(res.Body)
 }
 
-func decodeAnnounceResponse(r io.Reader) (int64, []string, error) {
+func decodeAnnounceResponse(r io.Reader) (time.Duration, []string, error) {
 	value, err := bencode.Decode(r)
 	if err != nil {
 		return 0, nil, err
@@ -102,5 +103,5 @@ func decodeAnnounceResponse(r io.Reader) (int64, []string, error) {
 		}
 	}
 
-	return interval, peers, nil
+	return time.Duration(interval) * time.Second, peers, nil
 }

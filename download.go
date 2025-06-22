@@ -72,7 +72,7 @@ func (dl *Downloader) announce(out io.WriterAt) error {
 	event := "started"
 	for dl.downloaded.Load() < uint64(*dl.torrent.Info.Length) {
 		log.Println("announcing")
-		_, peerAddrs, err := announce(dl.torrent.AnnounceURL, announceParams{
+		interval, peerAddrs, err := announce(dl.torrent.AnnounceURL, announceParams{
 			InfoHash:   dl.infohash,
 			PeerID:     peerID,
 			Port:       6881,
@@ -97,7 +97,7 @@ func (dl *Downloader) announce(out io.WriterAt) error {
 		}
 
 		select {
-		case <-time.After(60 * time.Second):
+		case <-time.After(interval):
 		case <-dl.announceCh:
 		}
 
