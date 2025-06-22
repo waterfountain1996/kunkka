@@ -41,7 +41,7 @@ func announce(trackerURL string, params announceParams) (time.Duration, []string
 	q.Set("uploaded", strconv.FormatInt(params.Uploaded, 10))
 	q.Set("downloaded", strconv.FormatUint(params.Downloaded, 10))
 	q.Set("left", strconv.FormatInt(params.Left, 10))
-	if ev := params.Event; ev != "" {
+	if ev := params.Event; ev != "" && ev != "empty" {
 		q.Set("event", ev)
 	}
 	q.Set("compact", "1")
@@ -89,7 +89,7 @@ func decodeAnnounceResponse(r io.Reader) (time.Duration, []string, error) {
 					peers[i] = net.JoinHostPort(peerIP, strconv.FormatInt(peerPort, 10))
 				}
 			case string:
-				if tt == "" || len(tt)%6 != 0 {
+				if len(tt)%6 != 0 {
 					return 0, nil, errors.New("malformed tracker response")
 				}
 				peers = make([]string, 0, len(tt)/6)

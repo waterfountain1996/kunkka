@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/binary"
 	"errors"
@@ -11,7 +12,6 @@ import (
 	"log"
 	"math/rand/v2"
 	"os"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,64 +46,95 @@ func NewDownloader(t *torrent.Torrent) *Downloader {
 	}
 }
 
-func (dl *Downloader) Download() error {
+func (dl *Downloader) startDownload(ctx context.Context) error {
 	out, err := os.Create(dl.torrent.Info.Name)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Sync(); err != nil {
+			log.Println("error flushing the file:", err)
+		}
+		_ = out.Close()
+	}()
 
-	go dl.announce(out)
-
-	for pieceIndex := range randomPieces(dl.torrent.Info.NumPieces()) {
-		dl.pieceQueue <- pieceIndex
+	interval, peerAddrs, err := dl.doAnnounce("started")
+	if err != nil {
+		return err
 	}
 
-	for dl.downloaded.Load() < uint64(*dl.torrent.Info.Length) {
-		runtime.Gosched()
-	}
-	close(dl.pieceQueue)
+	dl.addPeers(peerAddrs, out)
 
-	dl.wg.Wait()
-	return out.Sync()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	go func() {
+		for range ticker.C {
+			_, peerAddrs, err := dl.doAnnounce("empty")
+			if err != nil {
+				log.Println("announce error:", err)
+				continue
+			}
+
+			dl.addPeers(peerAddrs, out)
+		}
+	}()
+
+	dl.wg.Add(1)
+	go func() {
+		defer dl.wg.Done()
+
+		for pieceIndex := range randomPieces(dl.torrent.Info.NumPieces()) {
+			dl.pieceQueue <- pieceIndex
+		}
+		close(dl.pieceQueue) // Race condition because consumers may re-send to this channel
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		dl.wg.Wait()
+		done <- struct{}{}
+	}()
+
+	var retErr error
+	select {
+	case <-done:
+		ticker.Stop()
+		if _, _, err := dl.doAnnounce("completed"); err != nil {
+			log.Println("announce error:", err)
+		}
+	case <-ctx.Done():
+		ticker.Stop()
+		if _, _, err := dl.doAnnounce("stopped"); err != nil {
+			log.Println("announce error:", err)
+		}
+		retErr = ctx.Err()
+	}
+
+	return retErr
 }
 
-func (dl *Downloader) announce(out io.WriterAt) error {
-	event := "started"
-	for dl.downloaded.Load() < uint64(*dl.torrent.Info.Length) {
-		log.Println("announcing")
-		interval, peerAddrs, err := announce(dl.torrent.AnnounceURL, announceParams{
-			InfoHash:   dl.infohash,
-			PeerID:     peerID,
-			Port:       6881,
-			Uploaded:   0,
-			Downloaded: dl.downloaded.Load(),
-			Left:       *dl.torrent.Info.Length - int64(dl.downloaded.Load()),
-			Event:      event,
-		})
-		if err != nil {
-			return err
-		}
+func (dl *Downloader) addPeers(addrs []string, out io.WriterAt) {
+	for _, addr := range addrs {
+		dl.wg.Add(1)
+		go func() {
+			defer dl.wg.Done()
 
-		for _, peerAddr := range peerAddrs {
-			dl.wg.Add(1)
-			go func() {
-				defer dl.wg.Done()
-
-				if err := dl.spawnPeer(peerAddr, dl.pieceQueue, out); err != nil {
-					log.Println("peer:", err)
-				}
-			}()
-		}
-
-		select {
-		case <-time.After(interval):
-		case <-dl.announceCh:
-		}
-
-		event = "empty"
+			_ = dl.spawnPeer(addr, dl.pieceQueue, out)
+		}()
 	}
-	return nil
+}
+
+func (dl *Downloader) doAnnounce(ev string) (time.Duration, []string, error) {
+	return announce(dl.torrent.AnnounceURL, announceParams{
+		InfoHash:   dl.infohash,
+		PeerID:     peerID,
+		Port:       6881,
+		Uploaded:   0,
+		Downloaded: dl.downloaded.Load(),
+		Left:       *dl.torrent.Info.Length - int64(dl.downloaded.Load()),
+		Event:      ev,
+	})
 }
 
 type pieceResult struct {

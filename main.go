@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/waterfountain1996/kunkka/internal/torrent"
 )
@@ -17,13 +20,16 @@ func main() {
 	}
 	filename := os.Args[1]
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	t, err := torrent.FromFile(filename)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	dl := NewDownloader(t)
-	if err := dl.Download(); err != nil {
+	if err := dl.startDownload(ctx); err != nil {
 		log.Fatalf("download: %v\n", err)
 	}
 }
