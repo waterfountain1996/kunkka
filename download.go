@@ -137,11 +137,6 @@ func (dl *Downloader) doAnnounce(ev string) (time.Duration, []string, error) {
 	})
 }
 
-type pieceResult struct {
-	index int
-	data  []byte
-}
-
 func (dl *Downloader) spawnPeer(ctx context.Context, peerAddr string, pieceQueue chan int, dst io.WriterAt) error {
 	dl.peerCount.Add(1)
 	defer func() {
