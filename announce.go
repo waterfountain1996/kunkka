@@ -15,6 +15,14 @@ import (
 	"github.com/waterfountain1996/kunkka/internal/bencode"
 )
 
+type announceError struct {
+	msg string
+}
+
+func (e announceError) Error() string {
+	return e.msg
+}
+
 type announceParams struct {
 	InfoHash   string
 	PeerID     string
@@ -97,7 +105,7 @@ func decodeAnnounceResponse(r io.Reader) (time.Duration, []string, error) {
 			}
 		case "failure reason":
 			if errmsg, ok := value.(string); ok && errmsg != "" {
-				return 0, nil, fmt.Errorf("announce query failed: %s", errmsg)
+				return 0, nil, announceError{msg: errmsg}
 			}
 			return 0, nil, errors.New("malformed tracker response")
 		}
