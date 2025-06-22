@@ -63,7 +63,7 @@ func (dl *Downloader) startDownload(ctx context.Context) error {
 		return err
 	}
 
-	dl.addPeers(peerAddrs, out)
+	dl.addPeers(ctx, peerAddrs, out)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -76,7 +76,7 @@ func (dl *Downloader) startDownload(ctx context.Context) error {
 				continue
 			}
 
-			dl.addPeers(peerAddrs, out)
+			dl.addPeers(ctx, peerAddrs, out)
 		}
 	}()
 
@@ -114,13 +114,13 @@ func (dl *Downloader) startDownload(ctx context.Context) error {
 	return retErr
 }
 
-func (dl *Downloader) addPeers(addrs []string, out io.WriterAt) {
+func (dl *Downloader) addPeers(ctx context.Context, addrs []string, out io.WriterAt) {
 	for _, addr := range addrs {
 		dl.wg.Add(1)
 		go func() {
 			defer dl.wg.Done()
 
-			_ = dl.spawnPeer(addr, dl.pieceQueue, out)
+			_ = dl.spawnPeer(ctx, addr, dl.pieceQueue, out)
 		}()
 	}
 }
@@ -142,7 +142,7 @@ type pieceResult struct {
 	data  []byte
 }
 
-func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.WriterAt) error {
+func (dl *Downloader) spawnPeer(ctx context.Context, peerAddr string, pieceQueue chan int, dst io.WriterAt) error {
 	dl.peerCount.Add(1)
 	defer func() {
 		if n := dl.peerCount.Add(-1); n == 0 {
@@ -188,36 +188,39 @@ func (dl *Downloader) spawnPeer(peerAddr string, pieceQueue chan int, dst io.Wri
 		return fmt.Errorf("interested: %w", err)
 	}
 
-	for pieceIndex := range pieceQueue {
-		if !p.hasPiece(pieceIndex) {
-			pieceQueue <- pieceIndex
-			continue
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case pieceIndex := <-pieceQueue:
+			if !p.hasPiece(pieceIndex) {
+				pieceQueue <- pieceIndex
+				continue
+			}
 
-		dw := downloadWork{
-			index:  pieceIndex,
-			length: int(dl.torrent.Info.PieceLength),
-		}
-		if length := int(*dl.torrent.Info.Length) - pieceIndex*dw.length; length < dw.length {
-			dw.length = length
-		}
-		copy(dw.checksum[:], []byte(dl.torrent.Info.Pieces[pieceIndex*sha1.Size:]))
+			dw := downloadWork{
+				index:  pieceIndex,
+				length: int(dl.torrent.Info.PieceLength),
+			}
+			if length := int(*dl.torrent.Info.Length) - pieceIndex*dw.length; length < dw.length {
+				dw.length = length
+			}
+			copy(dw.checksum[:], []byte(dl.torrent.Info.Pieces[pieceIndex*sha1.Size:]))
 
-		data, err := downloadPiece(p, dw)
-		if err != nil {
-			pieceQueue <- pieceIndex
-			return err
-		}
+			data, err := downloadPiece(p, dw)
+			if err != nil {
+				pieceQueue <- pieceIndex
+				return err
+			}
 
-		if _, err := dst.WriteAt(data, int64(pieceIndex)*dl.torrent.Info.PieceLength); err != nil {
-			return err
-		}
+			if _, err := dst.WriteAt(data, int64(pieceIndex)*dl.torrent.Info.PieceLength); err != nil {
+				return err
+			}
 
-		dl.downloaded.Add(uint64(len(data)))
-		log.Printf("Piece %d completed (%d/%d)\n", dw.index, dl.downloaded.Load(), *dl.torrent.Info.Length)
+			dl.downloaded.Add(uint64(len(data)))
+			log.Printf("Piece %d completed (%d/%d)\n", dw.index, dl.downloaded.Load(), *dl.torrent.Info.Length)
+		}
 	}
-
-	return nil
 }
 
 func randomPieces(n int) iter.Seq[int] {
