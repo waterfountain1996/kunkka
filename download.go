@@ -12,6 +12,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,7 +88,10 @@ func (dl *Downloader) startDownload(ctx context.Context) error {
 		for pieceIndex := range randomPieces(dl.torrent.Info.NumPieces()) {
 			dl.pieceQueue <- pieceIndex
 		}
-		close(dl.pieceQueue) // Race condition because consumers may re-send to this channel
+		for *dl.torrent.Info.Length < int64(dl.downloaded.Load()) {
+			runtime.Gosched()
+		}
+		close(dl.pieceQueue)
 	}()
 
 	done := make(chan struct{})
