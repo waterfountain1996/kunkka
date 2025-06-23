@@ -187,7 +187,11 @@ func (dl *Downloader) spawnPeer(ctx context.Context, peerAddr string, pieceQueue
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case pieceIndex := <-pieceQueue:
+		case pieceIndex, more := <-pieceQueue:
+			if !more {
+				return nil
+			}
+
 			if !p.hasPiece(pieceIndex) {
 				pieceQueue <- pieceIndex
 				continue
