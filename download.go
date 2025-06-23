@@ -35,7 +35,6 @@ type Downloader struct {
 	peerCount  atomic.Int32
 	downloaded atomic.Uint64
 	pieceQueue chan int
-	announceCh chan struct{}
 }
 
 func NewDownloader(t *torrent.Torrent) *Downloader {
@@ -43,7 +42,6 @@ func NewDownloader(t *torrent.Torrent) *Downloader {
 		torrent:    t,
 		infohash:   t.Info.Hash(),
 		pieceQueue: make(chan int),
-		announceCh: make(chan struct{}),
 	}
 }
 
@@ -143,11 +141,7 @@ func (dl *Downloader) doAnnounce(ev string) (time.Duration, []string, error) {
 
 func (dl *Downloader) spawnPeer(ctx context.Context, peerAddr string, pieceQueue chan int, dst io.WriterAt) error {
 	dl.peerCount.Add(1)
-	defer func() {
-		if n := dl.peerCount.Add(-1); n == 0 {
-			dl.announceCh <- struct{}{}
-		}
-	}()
+	defer dl.peerCount.Add(-1)
 
 	conn, err := dialPeer(peerAddr, dl.infohash, peerID)
 	if err != nil {
