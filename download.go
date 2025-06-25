@@ -46,7 +46,7 @@ func NewDownloader(t *torrent.Torrent) *Downloader {
 }
 
 func (dl *Downloader) startDownload(ctx context.Context) error {
-	out, err := os.Create(dl.torrent.Info.Name)
+	out, err := os.OpenFile(dl.torrent.Info.Name, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return err
 	}
